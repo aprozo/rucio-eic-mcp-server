@@ -24,6 +24,9 @@ from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 
+DEFAULT_PAGE_LIMIT = 50
+MAX_PAGE_LIMIT = 500
+
 EPIC_CAMPAIGN_PREFIXES = (
     "/RECO/",
     "/FULL/",
@@ -134,6 +137,78 @@ def _make_rucio_request(
         return {"status": response.status_code, "data": None}
     except requests.exceptions.RequestException as e:
         return {"error": str(e)}
+
+
+def _pagination_window(page: int = 1, limit: int = DEFAULT_PAGE_LIMIT) -> tuple[int, int, int, int]:
+    """Return normalized (page, limit, start, end) for in-memory result paging."""
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_PAGE_LIMIT
+    page = max(1, page)
+    limit = max(1, min(limit, MAX_PAGE_LIMIT))
+    start = (page - 1) * limit
+    return page, limit, start, start + limit
+
+
+def _paginate_items(items: list, page: int = 1, limit: int = DEFAULT_PAGE_LIMIT) -> tuple[list, dict]:
+    """Slice a list and return page metadata."""
+    page, limit, start, end = _pagination_window(page, limit)
+    total = len(items)
+    return items[start:end], {
+        "page": page,
+        "limit": limit,
+        "total_count": total,
+        "returned_count": max(0, min(end, total) - min(start, total)),
+        "has_more": end < total,
+        "next_page": page + 1 if end < total else None,
+    }
+
+
+def _paginate_data_result(
+    result: dict,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    nested_list_key: str | None = None,
+) -> dict:
+    """
+    Apply response-size-safe pagination to Rucio list results.
+
+    Rucio bulk file listing returns one DID wrapper containing a large `files`
+    list; other list endpoints generally return the large list directly as
+    result["data"]. Both shapes are handled here.
+    """
+    if "error" in result:
+        return result
+    data = result.get("data")
+    paged = dict(result)
+
+    if (
+        nested_list_key
+        and isinstance(data, list)
+        and len(data) == 1
+        and isinstance(data[0], dict)
+        and isinstance(data[0].get(nested_list_key), list)
+    ):
+        item = dict(data[0])
+        sliced, pagination = _paginate_items(item[nested_list_key], page, limit)
+        item[nested_list_key] = sliced
+        pagination["item_path"] = f"data[0].{nested_list_key}"
+        paged["data"] = [item]
+        paged["pagination"] = pagination
+        return paged
+
+    if isinstance(data, list):
+        sliced, pagination = _paginate_items(data, page, limit)
+        pagination["item_path"] = "data"
+        paged["data"] = sliced
+        paged["pagination"] = pagination
+
+    return paged
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +396,8 @@ def list_dids(
     type: str = "DATASET",
     filters: Optional[dict[str, str]] = None,
     long: bool = False,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
     Search for DIDs (Data Identifiers) within a given scope, with optional
@@ -349,6 +426,8 @@ def list_dids(
               0 matches for unpopulated keys — pre-26.03 DIDs have none.
         long: If True, return full DID info (type, bytes, length, ...) instead of
               just name. Useful when pairing a metadata search with inspection.
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of DIDs per page. Defaults to 50, maximum 500.
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -385,19 +464,26 @@ def list_dids(
                 "type=CONTAINER returned 0 results; showing DATASET results "
                 "instead. This scope appears to hold datasets, not containers."
             )
-            return retry
+            return _paginate_data_result(retry, page=page, limit=limit)
 
-    return result
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="List files within a Rucio dataset or container.")
-def list_files(scope: str, name: str) -> dict:
+def list_files(
+    scope: str,
+    name: str,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+) -> dict:
     """
     Fetch the file listing for a Rucio DID (dataset or container).
 
     Args:
         scope: Rucio scope (e.g., 'group.EIC').
         name: DID name (e.g., 'epic.26.02.0.ePIC_craterlake.p1001.e1.s1.r1').
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of files per page. Defaults to 50, maximum 500.
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -406,11 +492,17 @@ def list_files(scope: str, name: str) -> dict:
 
     url = f"{DIDS_URL}/bulkfiles"
     payload = {"dids": [{"scope": scope, "name": name}]}
-    return _make_rucio_request(url, method="POST", headers=headers, payload=payload)
+    result = _make_rucio_request(url, method="POST", headers=headers, payload=payload)
+    return _paginate_data_result(result, page=page, limit=limit, nested_list_key="files")
 
 
 @mcp.tool(description="List immediate children of a Rucio container or dataset.")
-def list_content(scope: str, name: str) -> dict:
+def list_content(
+    scope: str,
+    name: str,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+) -> dict:
     """
     List the child DIDs within a container or dataset (one level).
 
@@ -421,6 +513,8 @@ def list_content(scope: str, name: str) -> dict:
     Args:
         scope: Rucio scope (e.g., 'epic', 'group.EIC').
         name: DID name (may contain slashes, e.g., '/RECO/26.03.1/...').
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of child DIDs per page. Defaults to 50, maximum 500.
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -428,7 +522,8 @@ def list_content(scope: str, name: str) -> dict:
         return {"error": str(e)}
 
     url = f"{DIDS_URL}/{quote(scope, safe='')}/{quote(name, safe='')}/dids"
-    return _make_rucio_request(url, headers=headers)
+    result = _make_rucio_request(url, headers=headers)
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Get DID details — system fields plus any custom physics metadata (pwg, generator, software_release, beam energies, Q2, ion species, ...).")
@@ -533,6 +628,8 @@ def list_rules(
     name: Optional[str] = None,
     did: Optional[str] = None,
     filters: Optional[dict[str, str]] = None,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
     Fetch replication rules, optionally filtered.
@@ -549,6 +646,8 @@ def list_rules(
             - state: Filter by rule state — 'O' (OK), 'R' (Replicating), 'S' (Stuck).
             - rse_expression: Filter by destination RSE expression.
             Example: {"account": "wenaus", "state": "R"}
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of rules per page. Defaults to 50, maximum 500.
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -564,16 +663,23 @@ def list_rules(
         params["scope"] = scope
     if name:
         params["name"] = name
-    return _make_rucio_request(RULES_URL, headers=headers, params=params)
+    result = _make_rucio_request(RULES_URL, headers=headers, params=params)
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Get replica lock details for a replication rule.")
-def get_rule_locks(rule_id: str) -> dict:
+def get_rule_locks(
+    rule_id: str,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+) -> dict:
     """
     Fetch replica locks associated with a replication rule.
 
     Args:
         rule_id: The Rucio rule ID (UUID).
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of locks per page. Defaults to 50, maximum 500.
     """
     try:
         headers = _rucio_headers()
@@ -581,17 +687,24 @@ def get_rule_locks(rule_id: str) -> dict:
         return {"error": str(e)}
 
     url = f"{RULES_URL}/{rule_id}/locks"
-    return _make_rucio_request(url, headers=headers)
+    result = _make_rucio_request(url, headers=headers)
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Find where file replicas are located across RSEs.")
-def list_file_replicas(dids: list[dict[str, str]]) -> dict:
+def list_file_replicas(
+    dids: list[dict[str, str]],
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+) -> dict:
     """
     Fetch replica locations for a list of DIDs.
 
     Args:
         dids: List of DIDs, each a dict with 'scope' and 'name'.
               Example: [{"scope": "group.EIC", "name": "file.root"}]
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of replica entries per page. Defaults to 50, maximum 500.
 
     Returns replica locations (RSEs and PFNs) for each file.
     """
@@ -602,7 +715,8 @@ def list_file_replicas(dids: list[dict[str, str]]) -> dict:
 
     url = f"{REPLICAS_URL}/list"
     payload = {"dids": dids}
-    return _make_rucio_request(url, method="POST", headers=headers, payload=payload)
+    result = _make_rucio_request(url, method="POST", headers=headers, payload=payload)
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Extract scope and name from an EIC DID string.")

@@ -19,6 +19,34 @@ MCP server providing [Rucio](https://rucio.cern.ch/) data management tools for t
 | `list_file_replicas` | Find where file replicas are located across RSEs |
 | `extract_scope` | Parse an EIC DID string into scope and name |
 
+## Pagination
+
+Large Rucio listings are paginated by default so page 1 is safe for chat and
+stdio MCP clients. The list tools return at most 50 items unless `limit` is
+specified, with a hard maximum of 500.
+
+Paginated tools include `list_dids`, `list_files`, `list_content`,
+`list_rules`, `get_rule_locks`, and `list_file_replicas`. Responses include a
+`pagination` object:
+
+```json
+{
+  "page": 1,
+  "limit": 50,
+  "total_count": 1621,
+  "returned_count": 50,
+  "has_more": true,
+  "next_page": 2
+}
+```
+
+Request the next page by passing `page=2` with the same query. For example:
+
+```text
+list_dids(scope="epic", name="*26.04.1*", type="DATASET", page=1, limit=25)
+list_dids(scope="epic", name="*26.04.1*", type="DATASET", page=2, limit=25)
+```
+
 ## ePIC campaign scopes
 
 JLab ePIC production campaign datasets are commonly registered in the
