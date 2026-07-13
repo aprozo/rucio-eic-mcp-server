@@ -682,7 +682,7 @@ def get_rule_locks(
         limit: Number of locks per page. Defaults to 50, maximum 500.
     """
     try:
-        headers = _rucio_headers()
+        headers = _rucio_headers("application/x-json-stream")
     except RuntimeError as e:
         return {"error": str(e)}
 
