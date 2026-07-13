@@ -598,7 +598,7 @@ def list_rses() -> dict:
     EIC RSEs include BNL_SDCC_EIC, JLAB_EIC, etc.
     """
     try:
-        headers = _rucio_headers()
+        headers = _rucio_headers("application/x-json-stream")
     except RuntimeError as e:
         return {"error": str(e)}
 
