@@ -8,6 +8,7 @@ MCP server providing [Rucio](https://rucio.cern.ch/) data management tools for t
 |------|-------------|
 | `list_scopes` | List available Rucio scopes (discover what's on the server) |
 | `list_dids` | Search for datasets/containers within a scope (name pattern + metadata filters) |
+| `summarize_datasets` | Per-dataset file counts and sizes plus totals for all datasets matching a pattern, in one call |
 | `list_files` | List files within a dataset or container |
 | `get_did_metadata` | Get DID details (type, size, file count, custom fields) |
 | `get_account_limits` | Get storage quota limits for an account |
@@ -25,7 +26,7 @@ Large Rucio listings are paginated by default so page 1 is safe for chat and
 stdio MCP clients. The list tools return at most 50 items unless `limit` is
 specified, with a hard maximum of 500.
 
-Paginated tools include `list_dids`, `list_files`, `list_content`,
+Paginated tools include `list_dids`, `summarize_datasets`, `list_files`, `list_content`,
 `list_rules`, `get_rule_locks`, and `list_file_replicas`. Responses include a
 `pagination` object:
 

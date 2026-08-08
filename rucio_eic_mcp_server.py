@@ -554,6 +554,109 @@ def get_did_metadata(scope: str, name: str, plugin: str = "ALL") -> dict:
     return _make_rucio_request(url, headers=headers, params=params)
 
 
+# Widest match set summarize_datasets will reduce in one call; a broader
+# pattern gets an error advising a narrower one rather than a huge fetch.
+SUMMARY_MAX_DATASETS = 2000
+
+
+@mcp.tool(description="Summarize all datasets matching a name pattern in ONE call: per-dataset file counts and sizes plus totals. Use this for any 'how many files / how much data' question — never loop get_did_metadata or list_files over datasets.")
+def summarize_datasets(
+    scope: str,
+    name: Optional[str] = None,
+    filters: Optional[dict[str, str]] = None,
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+) -> dict:
+    """
+    One-call summary of every dataset matching a pattern: per-dataset file
+    count and byte size, plus totals over the full match set.
+
+    Example — "summarize the file counts for the datasets under
+    epic:/EVGEN":
+        summarize_datasets(scope='epic', name='/EVGEN/*')
+
+    Args:
+        scope: Rucio scope (e.g., 'epic', 'group.EIC').
+        name: Optional name pattern with Rucio wildcards '*' and '?'
+              (e.g., '/EVGEN/*', '*26.03.1*').
+        filters: Optional dict of metadata key=value filters, as in
+              list_dids.
+        page: Dataset-row page to return. The totals block always covers
+              every match regardless of paging.
+        limit: Dataset rows per page. Defaults to 50, maximum 500.
+
+    Returns:
+        totals: {datasets, files, bytes, unknown} over ALL matches —
+            'unknown' counts datasets whose size Rucio does not report.
+        data: per-dataset rows [{name, files, bytes}], name-sorted and
+            paginated.
+    """
+    try:
+        headers = _rucio_headers("application/x-json-stream")
+    except RuntimeError as e:
+        return {"error": str(e)}
+
+    url = f"{DIDS_URL}/{scope}/dids/search"
+    params: dict[str, str] = {"type": "DATASET", "long": "True"}
+    if name:
+        params["name"] = name
+    if filters:
+        for k, v in filters.items():
+            if k in params:
+                return {"error": f"filter key '{k}' conflicts with a reserved parameter"}
+            params[k] = v
+    result = _make_rucio_request(url, headers=headers, params=params)
+    if "error" in result:
+        return result
+
+    entries = result.get("data") or []
+    if len(entries) > SUMMARY_MAX_DATASETS:
+        return {"error": (
+            f"{len(entries)} datasets match — more than the "
+            f"{SUMMARY_MAX_DATASETS} this summary will reduce. "
+            "Narrow the name pattern or filters."
+        )}
+
+    rows = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        row = {
+            "name": entry.get("name"),
+            "files": entry.get("length"),
+            "bytes": entry.get("bytes"),
+        }
+        # The search's long form leaves length/bytes unset on some
+        # servers (JLab); the dataset replicas carry them. Take the max
+        # across RSEs — Rucio reports identical totals per replica.
+        if row["files"] is None and row["name"]:
+            rep = _make_rucio_request(
+                f"{REPLICAS_URL}/{quote(scope, safe='')}/"
+                f"{quote(row['name'], safe='')}/datasets",
+                headers=headers,
+            )
+            replicas = [r for r in (rep.get("data") or [])
+                        if isinstance(r, dict) and r.get("length") is not None]
+            if replicas:
+                row["files"] = max(r["length"] for r in replicas)
+                row["bytes"] = max(r.get("bytes") or 0 for r in replicas)
+        rows.append(row)
+    rows.sort(key=lambda r: r["name"] or "")
+
+    totals = {
+        "datasets": len(rows),
+        "files": sum(r["files"] for r in rows if r["files"] is not None),
+        "bytes": sum(r["bytes"] for r in rows if r["bytes"] is not None),
+        "unknown": sum(1 for r in rows if r["files"] is None),
+    }
+    paged = _paginate_data_result(
+        {"status": result.get("status"), "data": rows},
+        page=page, limit=limit,
+    )
+    paged["totals"] = totals
+    return paged
+
+
 @mcp.tool(description="Get storage quota limits for a Rucio account.")
 def get_account_limits(account: str) -> dict:
     """
