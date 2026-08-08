@@ -559,21 +559,40 @@ def get_did_metadata(scope: str, name: str, plugin: str = "ALL") -> dict:
 SUMMARY_MAX_DATASETS = 2000
 
 
+def _iso_utc(value) -> Optional[str]:
+    """Rucio timestamps ('Thu, 04 Jun 2026 19:10:37 UTC' strings, or the
+    datetimes _datetime_parser makes of them) as sortable ISO-8601 UTC."""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(
+                value, "%a, %d %b %Y %H:%M:%S %Z"
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return value
+    return None
+
+
 @mcp.tool(description="Summarize all datasets matching a name pattern in ONE call: per-dataset file counts and sizes plus totals. Use this for any 'how many files / how much data' question — never loop get_did_metadata or list_files over datasets.")
 def summarize_datasets(
     scope: str,
     name: Optional[str] = None,
     filters: Optional[dict[str, str]] = None,
+    order: str = "name",
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
     One-call summary of every dataset matching a pattern: per-dataset file
-    count and byte size, plus totals over the full match set.
+    count, byte size, and created/updated times, plus totals over the full
+    match set.
 
     Example — "summarize the file counts for the datasets under
     epic:/EVGEN":
         summarize_datasets(scope='epic', name='/EVGEN/*')
+    Example — "what are the latest added/updated EVGEN datasets":
+        summarize_datasets(scope='epic', name='/EVGEN/*', order='updated')
 
     Args:
         scope: Rucio scope (e.g., 'epic', 'group.EIC').
@@ -581,15 +600,17 @@ def summarize_datasets(
               (e.g., '/EVGEN/*', '*26.03.1*').
         filters: Optional dict of metadata key=value filters, as in
               list_dids.
+        order: Row order — 'name' (default, ascending), or 'updated' /
+              'created' (newest first; page 1 is the latest datasets).
         page: Dataset-row page to return. The totals block always covers
-              every match regardless of paging.
+            every match regardless of paging.
         limit: Dataset rows per page. Defaults to 50, maximum 500.
 
     Returns:
         totals: {datasets, files, bytes, unknown} over ALL matches —
             'unknown' counts datasets whose size Rucio does not report.
-        data: per-dataset rows [{name, files, bytes}], name-sorted and
-            paginated.
+        data: per-dataset rows [{name, files, bytes, created, updated}],
+            ordered and paginated.
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -625,23 +646,39 @@ def summarize_datasets(
             "name": entry.get("name"),
             "files": entry.get("length"),
             "bytes": entry.get("bytes"),
+            "created": _iso_utc(entry.get("created_at")),
+            "updated": _iso_utc(entry.get("updated_at")),
         }
-        # The search's long form leaves length/bytes unset on some
-        # servers (JLab); the dataset replicas carry them. Take the max
-        # across RSEs — Rucio reports identical totals per replica.
-        if row["files"] is None and row["name"]:
+        # The search's long form leaves length/bytes/dates unset on some
+        # servers (JLab); the dataset replicas carry them. Counts are the
+        # max across RSEs (Rucio reports identical totals per replica);
+        # created is the earliest replica, updated the latest touch.
+        if (row["files"] is None or row["updated"] is None) and row["name"]:
             rep = _make_rucio_request(
                 f"{REPLICAS_URL}/{quote(scope, safe='')}/"
                 f"{quote(row['name'], safe='')}/datasets",
                 headers=headers,
             )
             replicas = [r for r in (rep.get("data") or [])
-                        if isinstance(r, dict) and r.get("length") is not None]
-            if replicas:
-                row["files"] = max(r["length"] for r in replicas)
-                row["bytes"] = max(r.get("bytes") or 0 for r in replicas)
+                        if isinstance(r, dict)]
+            counted = [r for r in replicas if r.get("length") is not None]
+            if counted and row["files"] is None:
+                row["files"] = max(r["length"] for r in counted)
+                row["bytes"] = max(r.get("bytes") or 0 for r in counted)
+            created = [c for c in (_iso_utc(r.get("created_at"))
+                                   for r in replicas) if c]
+            updated = [u for u in (_iso_utc(r.get("updated_at"))
+                                   for r in replicas) if u]
+            if row["created"] is None and created:
+                row["created"] = min(created)
+            if row["updated"] is None and updated:
+                row["updated"] = max(updated)
         rows.append(row)
-    rows.sort(key=lambda r: r["name"] or "")
+    if order in ("updated", "created"):
+        # ISO strings sort chronologically; undated rows land last.
+        rows.sort(key=lambda r: r[order] or "", reverse=True)
+    else:
+        rows.sort(key=lambda r: r["name"] or "")
 
     totals = {
         "datasets": len(rows),
