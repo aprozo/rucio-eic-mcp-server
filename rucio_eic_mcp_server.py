@@ -551,7 +551,11 @@ def get_did_metadata(scope: str, name: str, plugin: str = "ALL") -> dict:
         return {"error": str(e)}
 
     url = f"{DIDS_URL}/{quote(scope, safe='')}/{quote(name, safe='')}/meta"
-    params = {"plugin": plugin} if plugin else None
+    # JLab's Rucio rejects the plugin selector (plugin=ALL returns 404 and
+    # the JSON plugin is not enabled on the server), while the
+    # parameterless call returns everything the server supports. Send the
+    # selector only when the caller names a specific non-default plugin.
+    params = {"plugin": plugin} if plugin and plugin != "ALL" else None
     return _make_rucio_request(url, headers=headers, params=params)
 
 
