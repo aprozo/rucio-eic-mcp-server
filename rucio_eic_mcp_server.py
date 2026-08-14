@@ -400,8 +400,9 @@ def list_dids(
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
-    Search for DIDs (Data Identifiers) within a given scope, with optional
-    name-pattern and metadata-filter criteria.
+    Search for DIDs within a scope — live Rucio query; seconds for narrow patterns, longer for broad wildcards over a large scope.
+
+    Optional name-pattern and metadata-filter criteria.
 
     Equivalent to the Rucio CLI:
         rucio did list "scope:pattern" --filter "key=value,key2=value2"
@@ -477,7 +478,7 @@ def list_files(
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
-    Fetch the file listing for a Rucio DID (dataset or container).
+    Fetch the file listing for one Rucio DID — live Rucio query, seconds per dataset.
 
     Args:
         scope: Rucio scope (e.g., 'group.EIC').
@@ -584,9 +585,10 @@ def summarize_datasets(
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
-    One-call summary of every dataset matching a pattern: per-dataset file
-    count, byte size, and created/updated times, plus totals over the full
-    match set.
+    One-call summary of every dataset matching a pattern — live Rucio walk of the full match set; broad wildcards can take a minute or more and may time out.
+
+    Per-dataset file count, byte size, and created/updated times, plus
+    totals over the full match set.
 
     Example — "summarize the file counts for the datasets under
     epic:/EVGEN":
@@ -838,7 +840,7 @@ def list_file_replicas(
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
     """
-    Fetch replica locations for a list of DIDs.
+    Fetch replica locations for a list of DIDs — live Rucio query, roughly a second per DID; keep the list short.
 
     Args:
         dids: List of DIDs, each a dict with 'scope' and 'name'.
